@@ -1,0 +1,183 @@
+% Energy Harvesting and SWIPT Lagrange iteration algorithm
+clc; clear all; close all;
+param;
+
+%% base station and small cell setup
+eNB=basesetup_19(radius); 
+pico = pico_generator(eNB);
+% generate UE
+UE = ue_generator(eNB,pico,V);
+UE=dist_angle_hexagon(eNB,pico,UE);
+% check point 1-base station, small cell, and UE
+% CheckPoint1(eNB,pico,UE);
+% Channel gain: pathloss + small scale
+[D UE]= pathloss_macro(eNB,pico,UE);
+for t=1:T
+    H{t}=D{t}.^(-4);
+end
+UE=small_scale(UE);
+
+%% Harvesting energy setup
+Harvesting_energy=harvesting_setup();
+
+%% Outer loop: SINR approximation
+% initial: equal power to all RB, 0.5 to power splitter ratio
+P_equal=P_max/num_RBs;
+h_mean=mean([mean(mean(UE.channel_gain{1}(UE.amount(1)*2/3+1:end,3,:),3)),mean(mean(UE.channel_gain{1}(UE.amount(1)/3+1:UE.amount(1)*2/3,2,:),3)),mean(mean(UE.channel_gain{1}(1:UE.amount(1)/3,1,:),3))]);
+I_ratio_init=0.5;
+SINR(1)=(I_ratio_init*P_equal*h_mean)/(I_ratio_init*Interference+N_proc);
+% SINR approximation
+iteration1=1;
+iteration2=100;
+for index_loop1=1:iteration1
+    a(index_loop1)=SINR(index_loop1)/(1+SINR(index_loop1));
+    b(index_loop1)=log(1+SINR(index_loop1))-SINR(index_loop1)/(1+SINR(index_loop1))*log(SINR(index_loop1));
+    
+    % Inital lagrange multiplier and power allocation(inital equal power)
+    % and EE
+    for t=1:T
+        M_alpha{t}=zeros(num_pico,UE.amount(t))+((Interference+2*N_proc)*log(2)/4-a*Wo*N_proc)/(a*Wo*N_proc);
+        M_delta{t}=ones(num_pico,UE.amount(t),num_RBs);
+        M_w{t}=zeros(num_pico,num_RBs);
+        M_pi{t}=zeros(num_pico,UE.amount(t))+3.5*10^14;
+        M_sita{t}=zeros(num_pico,UE.amount(t))+0.5*10^14;
+        P_AC{t}=zeros(num_pico,UE.amount(t),num_RBs);
+%         P_AC{t}(:,:,:)=P_equal/2;
+        P_HE{t}=zeros(num_pico,UE.amount(t),num_RBs);
+%         P_HE{t}(:,:,:)=P_equal/2;
+        n{t}=zeros(num_pico,UE.amount(t),num_RBs);
+    end
+    M_beta=zeros(T,num_pico)+10^7;
+    M_gamma=zeros(T,num_pico)+10^7;
+    M_landa=zeros(T,num_pico)+3*10^8;
+    
+    %% Initial step size
+    U_alpha=10^-7;
+    U_beta=10^5;
+    U_gamma=10^5;
+    U_delta=1;
+    U_landa=10^8;
+    U_pi=1*10^14;
+    U_sita=0.5*10^15;
+    % Initial EE
+    EE=0;
+    
+    %% Lagrange 
+    for index_loop2=1:iteration2
+        
+        for t=1:T
+            for i=1:num_pico
+                for k=1:UE.amount(t)
+                    for r=1:num_RBs
+                        temp=P_AC{t}(i,k,r);   
+%                         (a*Wo*(1+M_alpha{t}(i,k)))/(log(2)*(EE*P_efficiency-EE*UE.channel_gain{t}(k,i,r)*H_efficiency+M_landa(t,i)+M_pi{t}(i,k)*UE.channel_gain{t}(k,i,r)-M_sita{t}(i,k)*UE.channel_gain{t}(k,i,r)))
+%                         P_HE{t}(i,k,r)
+                        P_AC{t}(i,k,r)=max((a*Wo*(1+M_alpha{t}(i,k)))/(log(2)*(EE*P_efficiency-EE*UE.channel_gain{t}(k,i,r)*H_efficiency+M_landa(t,i)+M_pi{t}(i,k)*UE.channel_gain{t}(k,i,r)-M_sita{t}(i,k)*UE.channel_gain{t}(k,i,r)))-P_HE{t}(i,k,r),10^-9);
+                        P_HE{t}(i,k,r)=max((a*Wo*(1+M_alpha{t}(i,k)))/(log(2)*(sum(M_gamma(t:T,i)*P_efficiency)-sum(M_beta(t:T,i)*P_efficiency)+M_landa(t,i)+(M_pi{t}(i,k)-EE*H_efficiency-M_sita{t}(i,k))*UE.channel_gain{t}(k,i,r)))-P_AC{t}(i,k,r),10^-9);
+                        I_Ratio{t}(i,k,r)=min(max((-N_proc+sqrt(N_proc^2+4*Interference/log(2)/M_delta{t}(i,k,r)*(1+M_alpha{t}(i,k))*a*Wo*N_proc))/(2*Interference),0),1);
+                        E_Ratio{t}(i,k,r)=1-I_Ratio{t}(i,k,r);
+                        % RB allocated: marginal benefit
+                        temp_RB(k,r)=a*Wo*(1+M_alpha{t}(i,k))*(log2((I_Ratio{t}(i,k,r)*(P_AC{t}(i,k,r)+P_HE{t}(i,k,r))*UE.channel_gain{t}(k,i,r))/(I_Ratio{t}(i,k,r)*Interference+N_proc))-1/log(2)-N_proc/(log(2)*(I_Ratio{t}(i,k,r)*Interference+N_proc)))+M_delta{t}(i,k,r)+b*Wo+M_alpha{t}(i,k)*b*Wo;
+                    end
+                end
+                temp=temp_RB(((i-1)*UE.amount(t)/num_pico+1):(i)*UE.amount(t)/num_pico,:);
+                % RB allocation                 
+                clear I1_RB; clear trash;
+                for index_RB=1:num_RBs
+                    [trash(:,index_RB) I1_RB(:,index_RB)]=sort(temp(:,index_RB),'descend');
+                    n{t}(i,(i-1)*UE.amount(t)/num_pico+I1_RB(1,index_RB),index_RB)=1;
+                end
+                clear I_RB; clear trash;
+                for index_RB=1:UE.amount(t)/num_pico
+                    [trash(index_RB,:) I_RB(index_RB,:)]=sort(temp(index_RB,:),'descend');
+                    flag=0;
+                    for index_RB2=1:num_RBs
+%                         n{t}(i,(i-1)*UE.amount(t)/num_pico+I_RB(1,index_RB),index_RB)=1;
+                            if (n{t}(i,(i-1)*UE.amount(t)/num_pico+index_RB,index_RB2)==1)
+                                flag=1;
+                            end
+                    end
+                    if flag==0  
+                       for index_RB3=1:UE.amount(t)/num_pico
+                          n{t}(i,(i-1)*UE.amount(t)/num_pico+index_RB3,I_RB(index_RB,1))=0;
+                       end
+                       n{t}(i,(i-1)*UE.amount(t)/num_pico+index_RB,I_RB(index_RB,1))=1;
+                    end
+                end
+%                 [temp_M,temp_I]=max(temp(:));
+%                 [I_row, I_col] = ind2sub(size(temp),temp_I)
+%                 n{t}(i,(i-1)*UE.amount(t)/num_pico+I_row,I_col)=1;
+            end
+        end
+        
+        %% Update the lagrange multiplier 
+        % step size
+        U_alpha=U_alpha/index_loop2;
+        U_beta=U_beta/index_loop2;
+        U_gamma=U_gamma/index_loop2;
+        U_delta=U_delta/index_loop2;
+        U_landa=U_landa/index_loop2;
+        U_pi=U_pi/index_loop2;
+        U_sita=U_sita/index_loop2;
+        
+        HE_temp=zeros(1,num_pico);  % since sum from t=1 to l
+        for t=1:T
+            for i=1:num_pico
+               POWER_temp=0;    % use for M_landa update
+               for k=1:UE.amount(t)
+                   Capacity_temp=0;
+                   WPF_temp=0;  % for last two lagrange multiplier update
+                   for r=1:num_RBs
+                        Capacity_temp=Capacity_temp+a*n{t}(i,k,r)*Wo*log2((I_Ratio{t}(i,k,r)*(P_AC{t}(i,k,r)+P_HE{t}(i,k,r))*UE.channel_gain{t}(k,i,r))/(I_Ratio{t}(i,k,r)*Interference+N_proc))+b*n{t}(i,k,r)*Wo;
+                        HE_temp(i)=HE_temp(i)+P_efficiency*P_HE{t}(i,k,r);
+                        POWER_temp=POWER_temp+n{t}(i,k,r)*(P_AC{t}(i,k,r)+P_HE{t}(i,k,r));
+                        WPF_temp=WPF_temp+H_efficiency*E_Ratio{t}(i,k,r)*(n{t}(i,k,r)*(P_AC{t}(i,k,r)+P_HE{t}(i,k,r))*UE.channel_gain{t}(k,i,r)+n{t}(i,k,r)*Interference);
+                        % multiplier delta update!!! need check
+                        M_delta{t}(i,k,r)=(M_delta{t}(i,k,r)-U_delta*(n{t}(i,k,r)*(1-I_Ratio{t}(i,k,r)-E_Ratio{t}(i,k,r))));
+                   end
+                   % multiplier alpha update: use the Capacity_temp
+                   M_alpha{t}(i,k)=max(M_alpha{t}(i,k)-U_alpha*(Capacity_temp-R_min),0);
+                   % multiplier pi update: use WPF_temp
+                   M_pi{t}(i,k)=max(M_pi{t}(i,k)-U_pi*(P_UE-WPF_temp),0);
+                   % multiplier sita update: use WPF_temp
+                   M_sita{t}(i,k)=max(M_sita{t}(i,k)-U_sita*(WPF_temp-P_Require),0);
+                   
+               end
+               % multiplier beta update: use the HE_temp
+               M_beta(t,i)=max(M_beta(t,i)-U_beta*(E_B-sum(Harvesting_energy(1:t))+HE_temp(i)),0);
+               % multiplier gemma update: use the HE_temp
+               M_gamma(t,i)=max(M_gamma(t,i)-U_gamma*(sum(Harvesting_energy(1:t))-HE_temp(i)),0);
+               % multiplier landa update:
+               P_max-POWER_temp
+               M_landa(t,i)=max(M_landa(t,i)-U_landa*(P_max-POWER_temp),0);
+            end
+        end
+        
+        %% Check EE
+        CHECK_Capacity=0;
+        CHECK_PC_smallcell=0;
+        CHECK_Pkr_AC=0;
+        CHECK_PC_UE=0;
+        CHECK_PHE=0;
+        for t=1:T
+           for i=1:num_pico
+                CHECK_PC_smallcell=CHECK_PC_smallcell+Pc;
+                for k=1:UE.amount(t)
+                   CHECK_PC_UE=CHECK_PC_UE+P_UE;
+                   for r=1:num_RBs
+                        CHECK_Capacity=CHECK_Capacity+a*n{t}(i,k,r)*Wo*log2((I_Ratio{t}(i,k,r)*(P_AC{t}(i,k,r)+P_HE{t}(i,k,r))*UE.channel_gain{t}(k,i,r))/(I_Ratio{t}(i,k,r)*Interference+N_proc))+b*n{t}(i,k,r)*Wo;
+                        CHECK_Pkr_AC=CHECK_Pkr_AC+P_efficiency*n{t}(i,k,r)*P_AC{t}(i,k,r);
+                        CHECK_PHE=CHECK_PHE+H_efficiency*E_Ratio{t}(i,k,r)*n{t}(i,k,r)*((P_AC{t}(i,k,r)+P_HE{t}(i,k,r))*UE.channel_gain{t}(k,i,r)+Interference);
+                   end
+                end
+           end
+        end
+        CHECK_EE(index_loop2)=CHECK_Capacity/(CHECK_PC_smallcell+CHECK_Pkr_AC+CHECK_PC_UE-CHECK_PHE);
+        EE=CHECK_EE(index_loop2);
+    end
+    figure();
+    plot(CHECK_EE,'r*-');
+    
+end
+
+
